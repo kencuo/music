@@ -31,6 +31,7 @@
 
   const SRC_KEY = 'jhm-player-source-v1';
   const LRC_KEY = 'jhm-player-lyric-v1';
+  const PLAY_MODE_KEY = 'jhm-player-play-mode-v1';
   /* ═══════════════════════════ */
 
   const W = window.parent || window;
@@ -139,6 +140,7 @@
   .jhm-ctl span{cursor:pointer;color:#6d6154;font-size:.95em;transition:color .25s,transform .25s,opacity .25s;user-select:none}
   .jhm-ctl span:hover{color:#9c3a2e;transform:scale(1.15)}
   .jhm-ctl .pp{font-size:1.1em;color:#9c3a2e}
+  .jhm-ctl .play-mode{min-width:1.45em;text-align:center;line-height:1}
   .jhm-ctl .muted{opacity:.35}
   .jhm-src{text-align:center;font-size:.62em;color:#a5977c;letter-spacing:.1em;padding:3px 0 8px}
   .jhm-tip{padding:14px 15px;font-size:.82em;color:#9a8a6d;text-align:center;line-height:1.7}`;
@@ -175,6 +177,7 @@
       <div class="jhm-time"><span id="jhm-t1">00:00</span><span id="jhm-t2">00:00</span></div>
       <div class="jhm-ctl">
         <span id="jhm-prev">◁</span><span class="pp" id="jhm-pp">▷</span><span id="jhm-next">▷|</span>
+        <span class="play-mode" id="jhm-modebtn" role="button" tabindex="0"></span>
         <span id="jhm-back" title="回到曲单">≡</span>
         <span id="jhm-lrcbtn" title="悬浮歌词">词</span>
       </div>
@@ -188,6 +191,49 @@
 
   let queue = [], cur = -1, mode = 'queue', results = [];
   let lrcLines = [], lrcIdx = -1, lrcToken = 0;
+
+  /* ---------- 播放模式 ---------- */
+  const PLAY_MODES = ['list', 'single', 'random'];
+  const PLAY_MODE_META = {
+    list:   { icon: '🔁', label: '列表循环' },
+    single: { icon: '🔂', label: '单曲循环' },
+    random: { icon: '🔀', label: '随机播放' }
+  };
+  let playMode = 'list';
+  try {
+    const saved = W.localStorage.getItem(PLAY_MODE_KEY);
+    if (PLAY_MODE_META[saved]) playMode = saved;
+  } catch (e) {}
+
+  function paintPlayMode() {
+    const btn = $('jhm-modebtn');
+    const meta = PLAY_MODE_META[playMode];
+    btn.textContent = meta.icon;
+    btn.title = meta.label + '（点击切换）';
+    btn.setAttribute('aria-label', '播放模式：' + meta.label);
+    btn.dataset.mode = playMode;
+    audio.loop = playMode === 'single';
+  }
+
+  function setPlayMode(nextMode) {
+    if (!PLAY_MODE_META[nextMode]) return;
+    playMode = nextMode;
+    try { W.localStorage.setItem(PLAY_MODE_KEY, playMode); } catch (e) {}
+    paintPlayMode();
+  }
+
+  function cyclePlayMode() {
+    const current = PLAY_MODES.indexOf(playMode);
+    setPlayMode(PLAY_MODES[(current + 1) % PLAY_MODES.length]);
+  }
+
+  $('jhm-modebtn').onclick = cyclePlayMode;
+  $('jhm-modebtn').addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    cyclePlayMode();
+  });
+  paintPlayMode();
 
   /* ---------- 音源选择 ---------- */
   let curSrc = DEFAULT;
@@ -644,6 +690,7 @@
     catch (err) { console.warn('[听曲] 取链异常', err); }
     if (!u) { $('jhm-now').textContent = '各源均无链接：' + t.name; return; }
 
+    audio.loop = playMode === 'single';
     audio.src = u;
     $('jhm-now').innerHTML = esc(t.name) + '　·　' + esc(artist(t)) +
       '<span class="jhm-tag">' + esc(LABEL(srcOf(t))) + '</span>';
@@ -665,8 +712,31 @@
       }, 500);
     }
   }
-  const next = () => queue.length && play((cur + 1) % queue.length);
-  const prev = () => queue.length && play((cur - 1 + queue.length) % queue.length);
+  function randomTrackIndex() {
+    if (queue.length < 2) return queue.length ? 0 : -1;
+    let index;
+    do { index = Math.floor(Math.random() * queue.length); } while (index === cur);
+    return index;
+  }
+
+  function next(fromEnded = false) {
+    if (!queue.length) return;
+    if (fromEnded && playMode === 'single') {
+      audio.currentTime = 0;
+      audio.play().catch(err => console.warn('[听曲] 单曲循环续播失败', err));
+      return;
+    }
+    const index = playMode === 'random' ? randomTrackIndex() : (cur + 1) % queue.length;
+    play(index);
+  }
+
+  function prev() {
+    if (!queue.length) return;
+    const index = playMode === 'random'
+      ? randomTrackIndex()
+      : (cur - 1 + queue.length) % queue.length;
+    play(index);
+  }
 
   $('jhm-pp').onclick = () => {
     if (!audio.src) { if (queue.length) play(cur < 0 ? 0 : cur); return; }
@@ -676,7 +746,7 @@
   $('jhm-next').onclick = next;
   $('jhm-prev').onclick = prev;
   $('jhm-back').onclick = () => { mode = 'queue'; render(); };
-  audio.addEventListener('ended', next);
+  audio.addEventListener('ended', () => next(true));
   const fmt = s => {
     if (!isFinite(s) || s < 0) return '00:00';
     const m = Math.floor(s / 60), q = Math.floor(s % 60);
