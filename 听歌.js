@@ -32,6 +32,7 @@
   const SRC_KEY = 'jhm-player-source-v1';
   const LRC_KEY = 'jhm-player-lyric-v1';
   const PLAY_MODE_KEY = 'jhm-player-play-mode-v1';
+  const QUEUE_KEY = 'jhm-player-queue-v1';
   /* ═══════════════════════════ */
 
   const W = window.parent || window;
@@ -191,6 +192,40 @@
 
   let queue = [], cur = -1, mode = 'queue', results = [];
   let lrcLines = [], lrcIdx = -1, lrcToken = 0;
+
+  /* ---------- 歌单持久化 ---------- */
+  function loadQueue() {
+    try {
+      const raw = W.localStorage.getItem(QUEUE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      const songs = Array.isArray(saved) ? saved : saved && saved.queue;
+      if (!Array.isArray(songs)) throw new Error('歌单格式无效');
+
+      queue = songs.filter(song =>
+        song && typeof song === 'object' && song.id != null && typeof song.name === 'string'
+      );
+      const savedIndex = Array.isArray(saved) ? -1 : Number(saved.currentIndex);
+      cur = Number.isInteger(savedIndex) && savedIndex >= 0 && savedIndex < queue.length
+        ? savedIndex
+        : -1;
+    } catch (err) {
+      console.warn('[听曲] 恢复本地歌单失败，已忽略损坏的数据', err);
+      queue = [];
+      cur = -1;
+      try { W.localStorage.removeItem(QUEUE_KEY); } catch (e) {}
+    }
+  }
+
+  function saveQueue() {
+    try {
+      W.localStorage.setItem(QUEUE_KEY, JSON.stringify({ queue, currentIndex: cur }));
+    } catch (err) {
+      console.warn('[听曲] 保存本地歌单失败', err);
+    }
+  }
+
+  loadQueue();
 
   /* ---------- 播放模式 ---------- */
   const PLAY_MODES = ['list', 'single', 'random'];
@@ -650,6 +685,7 @@
         ${mode === 'queue' ? '<span class="x" data-x="' + i + '">✕</span>' : ''}
       </div>`).join('');
   }
+  render();
 
   $('jhm-box').addEventListener('click', e => {
     const x = e.target.closest('[data-x]');
@@ -661,6 +697,7 @@
         cur = -1; audio.pause(); $('jhm-now').textContent = '—';
         ball.classList.remove('playing'); clearLyric();
       } else if (cur > i) cur--;
+      saveQueue();
       render(); return;
     }
     const row = e.target.closest('[data-i]'); if (!row) return;
@@ -670,7 +707,7 @@
       const t = results[i];
       const at = queue.findIndex(q => key(q) === key(t));
       if (at >= 0) { mode = 'queue'; render(); play(at); }
-      else { queue.push(t); mode = 'queue'; render(); play(queue.length - 1); }
+      else { queue.push(t); saveQueue(); mode = 'queue'; render(); play(queue.length - 1); }
     }
   });
 
@@ -678,6 +715,7 @@
   async function play(i) {
     if (i < 0 || i >= queue.length) return;
     cur = i;
+    saveQueue();
     const t = queue[i];
     $('jhm-now').textContent = '⟨载⟩ ' + t.name;
     $('jhm-t1').textContent = $('jhm-t2').textContent = '00:00';
@@ -792,6 +830,7 @@
       const t = r[0];
       if (queue.some(q => key(q) === key(t))) return;
       queue.push(t);
+      saveQueue();
       if (mode === 'queue') render();
       if (autoplay && (audio.paused || !audio.src)) play(queue.length - 1);
       else {
