@@ -474,12 +474,138 @@
   W.addEventListener('resize', onViewportResize);
 
   /* ---------- 接口 ---------- */
-  function api(q) {
-    let u = API + '?' + new URLSearchParams(q).toString();
-    if (PROXY) u = PROXY + encodeURIComponent(u);
-    return fetch(u).then(r => r.json());
+  const API_TARGETS = [
+    { url: 'https://music.gdstudio.xyz/api.php', signed: true, label: 'GD音乐台新版' },
+    { url: 'https://music-api.gdstudio.xyz/api.php', signed: true, label: 'GD API签名接口' },
+    { url: 'https://music-api.gdstudio.xyz/api.php', signed: false, label: 'GD API旧接口' }
+  ];
+  const API_TIME = 'https://music.gdstudio.xyz/time';
+  const API_HOST = 'music.gdstudio.xyz';
+  const API_VERSION = '2026.07.21';
+  const API_TIMEOUT = 6000;
+  let preferredApiTarget = 0;
+  let serverTimePromise = null;
+
+  function fetchTimed(url, options, timeout) {
+    if (typeof AbortController === 'undefined') return fetch(url, options);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    return fetch(url, Object.assign({}, options, { signal: controller.signal }))
+      .finally(() => clearTimeout(timer));
   }
 
+  function md5(input) {
+    const binary = unescape(encodeURIComponent(String(input)));
+    const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
+    const size = (((bytes.length + 8) >>> 6) + 1) * 64;
+    const data = new Uint8Array(size);
+    data.set(bytes); data[bytes.length] = 0x80;
+    const view = new DataView(data.buffer);
+    const bitLength = bytes.length * 8;
+    view.setUint32(size - 8, bitLength >>> 0, true);
+    view.setUint32(size - 4, Math.floor(bitLength / 0x100000000), true);
+    const shifts = [
+      7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+      5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+      4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+      6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21
+    ];
+    let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+    const rotate = (value, amount) => (value << amount) | (value >>> (32 - amount));
+    for (let offset = 0; offset < size; offset += 64) {
+      const words = new Uint32Array(16);
+      for (let i = 0; i < 16; i++) words[i] = view.getUint32(offset + i * 4, true);
+      let a = a0, b = b0, c = c0, d = d0;
+      for (let i = 0; i < 64; i++) {
+        let f, g;
+        if (i < 16) { f = (b & c) | ((~b) & d); g = i; }
+        else if (i < 32) { f = (d & b) | (c & (~d)); g = (5 * i + 1) % 16; }
+        else if (i < 48) { f = b ^ c ^ d; g = (3 * i + 5) % 16; }
+        else { f = c ^ (b | (~d)); g = (7 * i) % 16; }
+        const k = Math.floor(Math.abs(Math.sin(i + 1)) * 0x100000000) >>> 0;
+        const next = (b + rotate((a + f + k + words[g]) >>> 0, shifts[i])) >>> 0;
+        a = d; d = c; c = b; b = next;
+      }
+      a0 = (a0 + a) >>> 0; b0 = (b0 + b) >>> 0;
+      c0 = (c0 + c) >>> 0; d0 = (d0 + d) >>> 0;
+    }
+    const word = value => [0, 8, 16, 24].map(shift =>
+      ((value >>> shift) & 0xff).toString(16).padStart(2, '0')).join('');
+    return word(a0) + word(b0) + word(c0) + word(d0);
+  }
+
+  function encodeForSign(value) {
+    return encodeURIComponent(String(value)).replace(/[!'()*]/g,
+      c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+  }
+
+  function makeApiSignature(payload, serverTime) {
+    const version = API_VERSION.split('.').map(part => part.length === 1 ? '0' + part : part).join('');
+    return md5(String(serverTime).slice(0, 9) + '|' + API_HOST + '|' + version + '|' + payload)
+      .slice(-8).toUpperCase();
+  }
+
+  function getServerTime() {
+    if (!serverTimePromise) {
+      const request = fetchTimed(API_TIME, { headers: { accept: 'text/plain' } }, 4000)
+        .then(response => {
+          if (!response.ok) throw new Error('time endpoint HTTP ' + response.status);
+          return response.text();
+        })
+        .then(value => value.trim() || String(Math.floor(Date.now() / 1000)))
+        .catch(() => String(Math.floor(Date.now() / 1000)));
+      serverTimePromise = request;
+      setTimeout(() => { if (serverTimePromise === request) serverTimePromise = null; }, 30000);
+    }
+    return serverTimePromise;
+  }
+
+  function apiPayload(q, signed) {
+    if (!signed) return Promise.resolve(new URLSearchParams(q).toString());
+    const payload = q.types === 'search' ? q.name : q.id;
+    return getServerTime().then(serverTime => new URLSearchParams(Object.assign({}, q, {
+      s: makeApiSignature(encodeForSign(payload || ''), serverTime)
+    })).toString());
+  }
+
+  async function requestApi(target, q) {
+    const body = await apiPayload(q, target.signed);
+    const rawUrl = target.signed ? target.url : target.url + '?' + body;
+    const url = PROXY ? PROXY + encodeURIComponent(rawUrl) : rawUrl;
+    const response = await fetchTimed(url, target.signed ? {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        accept: 'application/json, text/javascript, */*; q=0.01'
+      },
+      body
+    } : { headers: { accept: 'application/json, text/javascript, */*; q=0.01' } }, API_TIMEOUT);
+    const text = await response.text();
+    let data;
+    try { data = JSON.parse(text); }
+    catch (err) { throw new Error(target.label + ' 返回非 JSON（HTTP ' + response.status + '）'); }
+    if (!response.ok) throw new Error(target.label + ' HTTP ' + response.status);
+    if (q.types === 'search' && !Array.isArray(data)) throw new Error(target.label + ' 搜索返回格式异常');
+    if (data && typeof data === 'object' && (data.error || data.code === -1)) throw new Error(target.label + ' 返回错误');
+    return data;
+  }
+
+  async function api(q) {
+    const order = [preferredApiTarget];
+    for (let i = 0; i < API_TARGETS.length; i++) if (!order.includes(i)) order.push(i);
+    let lastError;
+    for (const index of order) {
+      try {
+        const data = await requestApi(API_TARGETS[index], q);
+        preferredApiTarget = index;
+        return data;
+      } catch (err) {
+        lastError = err;
+        console.warn('[听曲] ' + API_TARGETS[index].label + ' 请求失败', err);
+      }
+    }
+    throw lastError || new Error('音乐 API 不可用');
+  }
   const artist = t => Array.isArray(t.artist) ? t.artist.join(' / ') : (t.artist || '');
   const srcOf  = t => t.source || 'netease';
   const key    = t => srcOf(t) + ':' + t.id;
