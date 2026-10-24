@@ -1005,12 +1005,26 @@
     positionLyric();
   };
 
-  /* ---------- 重载清理 ---------- */
-  W.__jhmCleanup = function () {
+  /* ---------- 重载/条目卸载清理 ----------
+     条目通常运行在一个沙箱 iframe 中，而播放器 DOM 和 Audio 在父页面里。
+     条目关闭时 iframe 会被卸载，因此要在当前窗口的卸载生命周期里主动清理父页面。
+  */
+  let cleaned = false;
+  function cleanup() {
+    if (cleaned) return;
+    cleaned = true;
     try { audio.pause(); audio.src = ''; } catch (e) {}
     dragCleanups.forEach(fn => fn());
     W.removeEventListener('resize', onViewportResize);
     [ball, L, p, css].forEach(el => { if (el && el.parentNode) el.parentNode.removeChild(el); });
     W.__jhmCleanup = null;
-  };
+    window.removeEventListener('pagehide', cleanup);
+    window.removeEventListener('beforeunload', cleanup);
+    window.removeEventListener('unload', cleanup);
+  }
+
+  W.__jhmCleanup = cleanup;
+  window.addEventListener('pagehide', cleanup, { once: true });
+  window.addEventListener('beforeunload', cleanup, { once: true });
+  window.addEventListener('unload', cleanup, { once: true });
 })();
